@@ -1,0 +1,23 @@
+name: AI review
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, ready_for_review]
+    branches: ["@@BASE_BRANCH@@"]
+
+permissions:
+  contents: read
+  pull-requests: write
+
+concurrency:
+  group: ai-review-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  ai-review:
+    uses: joaomj/github-ci/.github/workflows/ai-review.yml@@CI_SHA@@
+    with:
+      ci-ref: "@@CI_SHA@@"
+      config-ref: "@@CONFIG_SHA@@"
+    secrets:
+      LLM_API_KEY: ${{ secrets.LLM_API_KEY }}

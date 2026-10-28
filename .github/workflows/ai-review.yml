@@ -1,0 +1,178 @@
+name: AI review
+
+# Reusable pre-merge review for a pull request. A repository installs a caller
+# workflow that names this file:
+#
+#   jobs:
+#     ai-review:
+#       uses: joaomj/github-ci/.github/workflows/ai-review.yml@<commit>
+#       with:
+#         ci-ref: <commit>
+#         config-ref: <commit>
+#       secrets:
+#         LLM_API_KEY: ${{ secrets.LLM_API_KEY }}
+#
+# `scripts/install-review.sh` writes that caller and pins both commits.
+# The guidelines come from joaomj/pi-agent-config, so the review follows the
+# same instructions you use locally.
+
+on:
+  workflow_call:
+    inputs:
+      ci-ref:
+        description: Commit in this repository that supplies prelude and verdict text.
+        type: string
+        required: true
+      config-ref:
+        description: Commit or tag in joaomj/pi-agent-config that supplies the guidelines.
+        type: string
+        default: v0.7.2
+      guidelines:
+        description: Guideline file, relative to config-ref.
+        type: string
+        default: prompts/code-review.md
+      model:
+        description: Model id for the review.
+        type: string
+        default: deepseek/deepseek-flash
+      thinking:
+        description: Thinking level passed to the model.
+        type: string
+        default: high
+    secrets:
+      LLM_API_KEY:
+        required: true
+
+permissions:
+  contents: read
+
+jobs:
+  review:
+    name: review
+    if: >-
+      github.event.pull_request.draft == false &&
+      github.event.repository.private == false &&
+      github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
+      pull-requests: write
+    env:
+      PI_TELEMETRY: '0'
+      PI_SKIP_VERSION_CHECK: '1'
+      PR_NUMBER: ${{ github.event.pull_request.number }}
+      BASE_REF: ${{ github.event.pull_request.base.ref }}
+      HEAD_REF: ${{ github.event.pull_request.head.ref }}
+      HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+    steps:
+      - name: Check out the pull request
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          fetch-depth: 0
+
+      - name: Install Node.js
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
+        with:
+          node-version: '22'
+
+      - name: Install Pi
+        run: |
+          npm install --prefix "$RUNNER_TEMP/pi" @earendil-works/pi-coding-agent@1.4.0
+          printf '%s\n' "$RUNNER_TEMP/pi/node_modules/.bin" >> "$GITHUB_PATH"
+
+      - name: Fetch this repository
+        env:
+          CI_REF: ${{ inputs.ci-ref }}
+        run: |
+          git -C "$RUNNER_TEMP" init --quiet ci
+          git -C "$RUNNER_TEMP/ci" remote add origin https://github.com/joaomj/github-ci
+          git -C "$RUNNER_TEMP/ci" fetch --quiet --depth 1 origin "$CI_REF" \
+            || { echo "::error::Cannot fetch $CI_REF from joaomj/github-ci."; exit 1; }
+          git -C "$RUNNER_TEMP/ci" checkout --quiet FETCH_HEAD
+
+      - name: Fetch the review guidelines
+        env:
+          CONFIG_REF: ${{ inputs.config-ref }}
+        run: |
+          git -C "$RUNNER_TEMP" init --quiet config
+          git -C "$RUNNER_TEMP/config" remote add origin https://github.com/joaomj/pi-agent-config
+          git -C "$RUNNER_TEMP/config" fetch --quiet --depth 1 origin "$CONFIG_REF" \
+            || { echo "::error::Cannot fetch $CONFIG_REF from joaomj/pi-agent-config."; exit 1; }
+          git -C "$RUNNER_TEMP/config" checkout --quiet FETCH_HEAD
+
+      - name: Assemble the review prompt
+        env:
+          GUIDELINES: ${{ inputs.guidelines }}
+        run: |
+          {
+            printf 'Automated pre-merge review. Repository %s, pull request #%s, `%s` into `%s` at %s.\n\n' \
+              "$GITHUB_REPOSITORY" "$PR_NUMBER" "$HEAD_REF" "$BASE_REF" "$HEAD_SHA"
+            printf 'The working directory holds the pull request head with full history; the base branch is `origin/%s`.\n\n' "$BASE_REF"
+            cat "$RUNNER_TEMP/ci/review/prelude.md"
+            printf '\n'
+            cat "$RUNNER_TEMP/config/$GUIDELINES"
+            printf '\n'
+            cat "$RUNNER_TEMP/ci/review/verdict.md"
+          } > "$RUNNER_TEMP/prompt.md"
+          wc -c "$RUNNER_TEMP/prompt.md"
+
+      - name: Configure Pi
+        run: |
+          mkdir -p "$HOME/.pi/agent"
+          cat > "$HOME/.pi/agent/settings.json" <<JSON
+          {
+            "defaultProjectTrust": "never",
+            "enableInstallTelemetry": false,
+            "skills": ["$RUNNER_TEMP/config/skills"]
+          }
+          JSON
+
+      - name: Review the pull request
+        env:
+          MODEL: ${{ inputs.model }}
+          THINKING: ${{ inputs.thinking }}
+          LLM_API_KEY: ${{ secrets.LLM_API_KEY }}
+        run: |
+          if [ -z "${LLM_API_KEY:-}" ]; then
+            echo "::error::LLM_API_KEY is empty. Set the repository secret."
+            exit 1
+          fi
+          if ! pi --print --no-session --no-approve --tools read,bash \
+              --model "$MODEL" --api-key "$LLM_API_KEY" --thinking "$THINKING" \
+              "$(cat "$RUNNER_TEMP/prompt.md")" > "$RUNNER_TEMP/review.md" 2> "$RUNNER_TEMP/pi.err"; then
+            echo "::error::Pi exited with a failure status. See the log above."
+            tail -20 "$RUNNER_TEMP/pi.err"
+            exit 1
+          fi
+          if [ ! -s "$RUNNER_TEMP/review.md" ]; then
+            echo "::error::Pi wrote an empty review."
+            tail -20 "$RUNNER_TEMP/pi.err"
+            exit 1
+          fi
+          cat "$RUNNER_TEMP/review.md"
+
+      - name: Post the review
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          {
+            printf '## AI review\n\n'
+            printf '<sub>Model `%s`, guidelines `%s`.</sub>\n\n' "${{ inputs.model }}" "${{ inputs.guidelines }}"
+            cat "$RUNNER_TEMP/review.md"
+          } > "$RUNNER_TEMP/comment.md"
+          gh pr review "$PR_NUMBER" --repo "$GITHUB_REPOSITORY" --comment --body-file "$RUNNER_TEMP/comment.md"
+
+      - name: Enforce the verdict
+        run: |
+          verdict=$(grep -Eo 'REVIEW-VERDICT: *(BLOCK|PASS)' "$RUNNER_TEMP/review.md" | tail -1 | grep -Eo 'BLOCK|PASS' || true)
+          case "$verdict" in
+            PASS) echo "Review passed." ;;
+            BLOCK)
+              echo "::error::The review reports P0 or P1 findings. Fix them, then push again."
+              exit 1 ;;
+            *)
+              echo "::error::The review did not end with a REVIEW-VERDICT line. Treating it as inconclusive."
+              exit 1 ;;
+          esac
