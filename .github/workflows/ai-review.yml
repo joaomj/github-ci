@@ -134,24 +134,9 @@ jobs:
           MODEL: ${{ inputs.model }}
           THINKING: ${{ inputs.thinking }}
           LLM_API_KEY: ${{ secrets.LLM_API_KEY }}
-        run: |
-          if [ -z "${LLM_API_KEY:-}" ]; then
-            echo "::error::LLM_API_KEY is empty. Set the repository secret."
-            exit 1
-          fi
-          if ! pi --print --no-session --no-approve --tools read,bash \
-              --model "$MODEL" --api-key "$LLM_API_KEY" --thinking "$THINKING" \
-              "$(cat "$RUNNER_TEMP/prompt.md")" > "$RUNNER_TEMP/review.md" 2> "$RUNNER_TEMP/pi.err"; then
-            echo "::error::Pi exited with a failure status. See the log above."
-            tail -20 "$RUNNER_TEMP/pi.err"
-            exit 1
-          fi
-          if [ ! -s "$RUNNER_TEMP/review.md" ]; then
-            echo "::error::Pi wrote an empty review."
-            tail -20 "$RUNNER_TEMP/pi.err"
-            exit 1
-          fi
-          cat "$RUNNER_TEMP/review.md"
+          PROMPT: ${{ runner.temp }}/prompt.md
+          OUT: ${{ runner.temp }}/review.md
+        run: bash "$RUNNER_TEMP/ci/scripts/review.sh"
 
       - name: Post the review
         env:

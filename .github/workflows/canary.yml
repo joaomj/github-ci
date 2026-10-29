@@ -1,0 +1,110 @@
+name: Canary
+
+# One real review against this repository, used to prove a release works before
+# the floating major tag moves and every caller picks it up.
+#
+#   gh workflow run canary.yml --ref v1.1.0
+#
+# It exercises the same code path the callers use: the same Pi install, the same
+# prompt assembly, the same model call, the same verdict parsing. It does not
+# exercise the caller workflow's own YAML, which only a real pull request can.
+
+on:
+  workflow_dispatch:
+    inputs:
+      config-ref:
+        description: Tag in joaomj/pi-agent-config supplying the guidelines.
+        type: string
+        default: v0.7.2
+      model:
+        description: Model id for the canary review.
+        type: string
+        default: openrouter/openai/gpt-6.1-sol
+      thinking:
+        description: Thinking level passed to the model.
+        type: string
+        default: medium
+
+permissions:
+  contents: read
+
+concurrency:
+  group: canary
+  cancel-in-progress: true
+
+jobs:
+  canary:
+    name: canary
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      PI_TELEMETRY: '0'
+      PI_SKIP_VERSION_CHECK: '1'
+    steps:
+      - name: Check out this tag
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          fetch-depth: 0
+
+      - name: Install Node.js
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
+        with:
+          node-version: '22'
+
+      - name: Install Pi
+        run: |
+          npm install --prefix "$RUNNER_TEMP/pi" @earendil-works/pi-coding-agent@1.4.0
+          printf '%s\n' "$RUNNER_TEMP/pi/node_modules/.bin" >> "$GITHUB_PATH"
+
+      - name: Fetch the review guidelines
+        env:
+          CONFIG_REF: ${{ inputs.config-ref }}
+        run: |
+          git -C "$RUNNER_TEMP" init --quiet config
+          git -C "$RUNNER_TEMP/config" remote add origin https://github.com/joaomj/pi-agent-config
+          git -C "$RUNNER_TEMP/config" fetch --quiet --depth 1 origin "$CONFIG_REF" \
+            || { echo "::error::Cannot fetch $CONFIG_REF from joaomj/pi-agent-config."; exit 1; }
+          git -C "$RUNNER_TEMP/config" checkout --quiet FETCH_HEAD
+
+      - name: Assemble the canary prompt
+        run: |
+          {
+            printf 'Automated canary review. Repository %s at %s, checking that the review machinery works.\n\n' \
+              "$GITHUB_REPOSITORY" "$GITHUB_SHA"
+            printf 'Review the most recent commit only: run `git show HEAD`. Keep the report short.\n\n'
+            cat review/prelude.md
+            printf '\n'
+            cat "$RUNNER_TEMP/config/prompts/code-review.md"
+            printf '\n'
+            cat review/verdict.md
+          } > "$RUNNER_TEMP/prompt.md"
+          wc -c "$RUNNER_TEMP/prompt.md"
+
+      - name: Configure Pi
+        run: |
+          mkdir -p "$HOME/.pi/agent"
+          cat > "$HOME/.pi/agent/settings.json" <<JSON
+          {
+            "defaultProjectTrust": "never",
+            "enableInstallTelemetry": false,
+            "skills": ["$RUNNER_TEMP/config/skills"]
+          }
+          JSON
+
+      - name: Review
+        env:
+          MODEL: ${{ inputs.model }}
+          THINKING: ${{ inputs.thinking }}
+          LLM_API_KEY: ${{ secrets.LLM_API_KEY }}
+          PROMPT: ${{ runner.temp }}/prompt.md
+          OUT: ${{ runner.temp }}/review.md
+        run: bash scripts/review.sh
+
+      - name: Enforce the verdict
+        run: |
+          verdict=$(grep -Eo 'REVIEW-VERDICT: *(BLOCK|PASS)' "$RUNNER_TEMP/review.md" | tail -1 | grep -Eo 'BLOCK|PASS' || true)
+          case "$verdict" in
+            PASS) echo "::notice::Canary review passed." ;;
+            BLOCK) echo "::error::The canary reports P0 or P1 findings."; exit 1 ;;
+            *) echo "::error::The canary review ended without a verdict line."; exit 1 ;;
+          esac

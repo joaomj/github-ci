@@ -84,20 +84,69 @@ check that never reports blocks every merge. The context is
 
 ## Releases and pinning
 
-Callers pin a release tag, and `uses:` plus `ci-ref` name the same tag. A tag
-never changes once published, because the `release` ruleset on this repository
-blocks tag updates and deletions; only an admin bypass moves one.
+Callers pin `v1`, a floating major tag. A release produces two tags:
 
-Cut a release after changing anything that runs:
+| Tag | Behavior |
+|---|---|
+| `v1.1.0` | Permanent. Protected by the `release` ruleset, signed, never moves |
+| `v1` | Moves to the newest release. What every caller pins |
 
 ```bash
 scripts/release.sh v1.1.0
-scripts/install-review.sh --ci-ref v1.1.0 joaomj/<repo>...
 ```
 
-A release is the unit of change: until you cut one, no repository moves. To
-upgrade, re-run the installer with the new `--ci-ref`; it rewrites the caller
-and opens a pull request in each repository.
+That one command tags the commit, pushes it, runs the canary against the exact
+tag, and only then moves `v1`. Nothing to re-pin, no pull requests in nine
+repositories, nothing to merge.
+
+The protection pattern is `refs/tags/v*.*.*`, so version tags are immutable
+while the major tag stays movable on purpose. A version tag is evidence; the
+major tag is a pointer.
+
+### How a release reaches the repositories
+
+Nothing is pushed into the repositories. Each one holds a caller naming
+`@v1`, and GitHub resolves that name when a run starts:
+
+1. A pull request opens, and GitHub resolves `v1` to its current commit and runs
+   that workflow version.
+2. The job fetches `github-ci` at `ci-ref` (`v1`) for the prelude and verdict
+   text.
+
+Updates are therefore lazy and per-event: a release takes effect on each
+repository's next pull request, a run already in flight keeps the code it
+started with, and nothing retroactively re-runs. A repository with no pull
+request activity keeps running older code until its next one.
+
+Rolling back is the same motion: move `v1` back to the previous release tag.
+
+```bash
+git tag --force --sign --annotate v1 --message "v1: back to v1.0.0" v1.0.0
+git push --force origin refs/tags/v1
+```
+
+### The canary
+
+`scripts/release.sh` refuses to move `v1` unless a real review succeeds against
+the exact tag being released: `.github/workflows/canary.yml` installs Pi,
+assembles the same prompt, calls the same `scripts/review.sh`, and requires a
+`REVIEW-VERDICT` line.
+
+It catches a broken Pi install, a bad model id, a broken prompt chain, and a
+missing verdict. It does not catch a broken caller workflow file, because only a
+real pull request exercises that path. If the canary fails, the version tag
+stays (it is immutable) and `v1` stays where it was: fix forward with the next
+patch release.
+
+The canary needs `LLM_API_KEY` on this repository, like any repository that runs
+a review.
+
+### Trust boundary
+
+A floating tag means whoever can push here can run code in every repository that
+holds `LLM_API_KEY`. That is why this repository carries the same baseline
+policy as the others: no deletion, no force push, signed commits, and merges
+through a pull request. Admin bypass still applies, as everywhere.
 
 ## Baseline policy
 
@@ -116,6 +165,10 @@ and opens a pull request in each repository.
 | Default merge commit message | repository settings |
 | Pull request and issue templates | files from `templates/` |
 
+This repository carries the same baseline, without the required AI review:
+nothing reviews `github-ci`'s own pull requests yet, so requiring the check there
+would block every merge.
+
 ```bash
 scripts/apply-baseline.sh --dry-run joaomj/example-repo
 scripts/apply-baseline.sh --require-review joaomj/example-repo
@@ -133,8 +186,10 @@ Two limits are worth knowing:
 
 | Task | Command |
 |---|---|
-| Change the reviewer model or thinking level | edit `.github/workflows/ai-review.yml`, release, re-pin |
-| Change the review guidelines | edit `prompts/code-review.md` in `pi-agent-config`, release there, re-pin with `--config-ref` |
+| Change the reviewer model or thinking level | edit `.github/workflows/ai-review.yml`, run `scripts/release.sh vX.Y.Z` |
+| Change the review guidelines | edit `prompts/code-review.md` in `pi-agent-config`, release it, then pass `--config-ref` to the next release here |
+| Run the canary by hand | `gh workflow run canary.yml --ref v1` |
+| Move `v1` back to an older release | the rollback commands above |
 | Pause reviews in one repository | `gh workflow disable "AI review" --repo joaomj/<repo>` |
 | Resume reviews | `gh workflow enable "AI review" --repo joaomj/<repo>` |
 | Rotate the key | `gh secret set LLM_API_KEY --repo joaomj/<repo>` |
@@ -150,8 +205,15 @@ the base branch, and the repository must have pull requests enabled. Check
 repository. This failure is deliberate: a review that cannot authenticate must
 not report success.
 
-**The job fails with "Cannot fetch ...".** A pinned tag does not exist. Check
-`git ls-remote https://github.com/joaomj/github-ci refs/tags/<tag>`.
+**The job fails with "Cannot fetch ...".** The pinned tag does not exist on the
+remote. Check `git ls-remote https://github.com/joaomj/github-ci refs/tags/v1`.
+
+**The canary failed during a release.** The version tag exists and `v1` did not
+move, so no repository changed. Read `gh run view <id> --log-failed`, fix, then
+release the next patch version.
+
+**Every repository broke at once.** `v1` moved to a bad release. Roll it back to
+the previous version tag; the next pull request in each repository uses it.
 
 **The job fails with "The review did not end with a REVIEW-VERDICT line".**
 The model omitted the protocol line. Re-run the job; if it repeats, tighten

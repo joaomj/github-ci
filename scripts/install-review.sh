@@ -6,7 +6,8 @@
 # Writes .github/workflows/ai-review.yml on a branch and opens a pull request.
 # Both references name releases: --ci-ref is a tag in this repository (the
 # workflow the caller runs) and --config-ref is a tag in joaomj/pi-agent-config
-# (the guidelines it follows).
+# (the guidelines it follows). The default `v1` is the floating major tag, so a
+# release reaches every caller without re-pinning.
 #
 # This script never writes repository secrets. Credentials are yours to add.
 
@@ -16,7 +17,7 @@ here=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 . "$here/lib.sh"
 
 config_ref=v0.7.2
-ci_ref=v1.0.0
+ci_ref=v1
 update=0
 repos=()
 
