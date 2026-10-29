@@ -34,11 +34,11 @@ on:
       model:
         description: Model id for the review.
         type: string
-        default: deepseek/deepseek-flash
+        default: openrouter/openai/gpt-6.1-sol
       thinking:
         description: Thinking level passed to the model.
         type: string
-        default: high
+        default: medium
     secrets:
       LLM_API_KEY:
         required: true

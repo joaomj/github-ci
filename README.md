@@ -37,7 +37,8 @@ gh secret set LLM_API_KEY --repo joaomj/example-repo
 
 The script never writes secrets. `LLM_API_KEY` is provider-neutral: the model
 input decides which provider is called, and the key reaches Pi through
-`--api-key`.
+`--api-key`. The default reviewer is `openrouter/openai/gpt-6.1-sol` at `medium`
+thinking; pass the `model` and `thinking` inputs to the caller to change it.
 
 ### Make a finding block the merge
 
