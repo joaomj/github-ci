@@ -1,7 +1,10 @@
 #!/usr/bin/env bash
 # Apply the baseline repository policy to repositories.
 #
-# Usage: scripts/apply-baseline.sh [--dry-run] [--skip-ruleset] owner/repo...
+# Usage: scripts/apply-baseline.sh [--dry-run] [--skip-ruleset] [--require-review] owner/repo...
+#
+# --require-review adds the "ai-review / review" status check to the ruleset, so
+# a failing review blocks a merge.
 #
 # Per repository:
 #   1. Settings: pull requests on, outside pull requests closed to
@@ -23,6 +26,7 @@ here=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 
 dry_run=0
 skip_ruleset=0
+require_review=0
 repos=()
 
 usage() {
@@ -33,6 +37,7 @@ while [ $# -gt 0 ]; do
   case "$1" in
     --dry-run) dry_run=1; shift ;;
     --skip-ruleset) skip_ruleset=1; shift ;;
+    --require-review) require_review=1; shift ;;
     -h|--help) usage; exit 0 ;;
     -*) die "unknown option: $1" ;;
     *) repos+=("$1"); shift ;;
@@ -43,19 +48,21 @@ done
 command -v gh >/dev/null || die "gh is not installed"
 command -v jq >/dev/null || die "jq is not installed"
 
+# Squash settings are rejected while squash merging is disabled, so they are
+# added per repository. Secret scanning is the only security feature the free
+# plan lets a public repository turn on from the API; non-provider patterns and
+# validity checks are ignored there.
 settings=$(jq -n '{
   has_pull_requests: true,
   pull_request_creation_policy: "collaborators_only",
   merge_commit_title: "PR_TITLE",
   merge_commit_message: "PR_BODY",
-  squash_merge_commit_title: "PR_TITLE",
-  squash_merge_commit_message: "PR_BODY",
   security_and_analysis: {
     secret_scanning: { status: "enabled" },
-    secret_scanning_push_protection: { status: "enabled" },
-    secret_scanning_non_provider_patterns: { status: "enabled" }
+    secret_scanning_push_protection: { status: "enabled" }
   }
 }')
+squash=$(jq -n '{ squash_merge_commit_title: "PR_TITLE", squash_merge_commit_message: "PR_BODY" }')
 
 base_ruleset=$(jq -n '{
   name: "default-branch",
@@ -81,6 +88,14 @@ base_ruleset=$(jq -n '{
       }
     }
   ]
+}')
+
+review_rule=$(jq -n '{
+  type: "required_status_checks",
+  parameters: {
+    strict_required_status_checks_policy: false,
+    required_status_checks: [{ context: "ai-review / review" }]
+  }
 }')
 
 codeql_rule=$(jq -n '{
@@ -109,7 +124,12 @@ for repo in "${repos[@]}"; do
     continue
   fi
 
-  if printf '%s\n' "$settings" | gh api --method PATCH "repos/$repo" --input - >/dev/null; then
+  info=$(gh api "repos/$repo" 2>&1) || die "cannot read $repo: $info"
+  payload=$(printf '%s\n' "$settings")
+  if [ "$(printf '%s' "$info" | jq -r .allow_squash_merge)" = true ]; then
+    payload=$(printf '%s\n%s\n' "$settings" "$squash" | jq -s '.[0] * .[1]')
+  fi
+  if printf '%s\n' "$payload" | gh api --method PATCH "repos/$repo" --input - >/dev/null; then
     printf 'settings: pull requests on, collaborators-only, merge message, secret scanning\n'
   else
     die "cannot change the settings of $repo"
@@ -134,13 +154,18 @@ for repo in "${repos[@]}"; do
     continue
   fi
 
-  payload=$base_ruleset
+  rules=$base_ruleset
+  note=""
   if [ "$(gh api "repos/$repo/code-scanning/analyses?per_page=1" 2>/dev/null | jq 'length' || printf 0)" -gt 0 ]; then
-    payload=$(printf '%s\n%s\n' "$base_ruleset" "$codeql_rule" \
-      | jq -s '.[0] * {rules: (.[0].rules + [.[1]])}')
+    rules=$(printf '%s\n%s\n' "$base_ruleset" "$codeql_rule" | jq -s '.[0] * {rules: (.[0].rules + [.[1]])}')
     note="with the CodeQL gate"
   else
     note="without the CodeQL gate, re-run once code scanning has results"
+  fi
+  payload=$rules
+  if [ "$require_review" -eq 1 ]; then
+    payload=$(printf '%s\n%s\n' "$rules" "$review_rule" | jq -s '.[0] * {rules: (.[0].rules + [.[1]])}')
+    note="$note, requiring the AI review check"
   fi
 
   existing=$(gh api "repos/$repo/rulesets" 2>/dev/null | jq -r '.[] | select(.name == "default-branch") | .id' || true)
