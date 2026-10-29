@@ -4,9 +4,9 @@
 # Usage: scripts/install-review.sh [--config-ref REF] [--ci-ref REF] [--update] owner/repo...
 #
 # Writes .github/workflows/ai-review.yml on a branch and opens a pull request.
-# Both references are pinned to commits: --ci-ref names the commit in this
-# repository that the caller runs, and --config-ref the commit in
-# joaomj/pi-agent-config that supplies the review guidelines.
+# Both references name releases: --ci-ref is a tag in this repository (the
+# workflow the caller runs) and --config-ref is a tag in joaomj/pi-agent-config
+# (the guidelines it follows).
 #
 # This script never writes repository secrets. Credentials are yours to add.
 
@@ -16,7 +16,7 @@ here=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 . "$here/lib.sh"
 
 config_ref=v0.7.2
-ci_ref=
+ci_ref=v1.0.0
 update=0
 repos=()
 
@@ -40,13 +40,11 @@ command -v gh >/dev/null || die "gh is not installed"
 command -v git >/dev/null || die "git is not installed"
 command -v jq >/dev/null || die "jq is not installed"
 
-config_sha=$(resolve_commit joaomj/pi-agent-config "$config_ref")
-if [ -z "$ci_ref" ]; then
-  ci_ref=$(git -C "$here/.." rev-parse HEAD)
-fi
-ci_sha=$(resolve_commit joaomj/github-ci "$ci_ref")
+# Both refs must exist, so a typo fails here instead of in nine workflows.
+resolve_commit joaomj/pi-agent-config "$config_ref" >/dev/null
+resolve_commit joaomj/github-ci "$ci_ref" >/dev/null
 
-printf '== github-ci      %s\n== pi-agent-config %s\n' "$ci_sha" "$config_sha"
+printf '== github-ci      %s\n== pi-agent-config %s\n' "$ci_ref" "$config_ref"
 
 work=$(mktemp -d)
 trap 'rm -rf "$work"' EXIT
@@ -74,9 +72,9 @@ for repo in "${repos[@]}"; do
   fi
   caller=$work/caller-${repo##*/}.yml
   sed -e "s|@@BASE_BRANCH@@|$base|g" \
-    -e "s|@@CI_SHA_AT@@|@$ci_sha|g" \
-    -e "s|@@CI_SHA@@|$ci_sha|g" \
-    -e "s|@@CONFIG_SHA@@|$config_sha|g" \
+    -e "s|@@CI_REF_AT@@|@$ci_ref|g" \
+    -e "s|@@CI_REF@@|$ci_ref|g" \
+    -e "s|@@CONFIG_REF@@|$config_ref|g" \
     "$here/../caller/ai-review.yml" > "$caller"
   printf '%s\n' "$(open_pr "$repo" ai-review "Add the AI review workflow" "$body" \
     "Add the AI review workflow" \

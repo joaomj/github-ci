@@ -1,64 +1,103 @@
 # github-ci
 
-Shared GitHub workflows for my repositories: one AI code review each time a
-pull request opens against the default branch, and one baseline branch policy.
+Shared GitHub automation for my repositories:
 
-A repository here means a small caller file that names a workflow in this
-repository. The logic lives here, so a change reaches every repository without
-editing any of them.
+- an AI code review on every pull request opened against the default branch;
+- a baseline branch policy applied to each repository.
 
-## AI review
+A repository holds one small caller file naming a workflow here, pinned to a
+release tag. The logic lives in this repository, so a change ships once, as a
+tag, and every caller can move to it with one command.
 
-`.github/workflows/ai-review.yml` runs on every pull request opened against the
-default branch. It reviews the change with the `code-review` guidelines from
-[pi-agent-config](https://github.com/joaomj/pi-agent-config), posts the report as
-a review comment, and fails when the report holds a P0 or P1 finding. A required
-branch check turns that failure into a blocked merge.
+## Layout
 
-The review runs as a GitHub Actions job. Nothing is hosted: the job installs
-[Pi](https://pi.dev) on a fresh runner, points it at the pinned guidelines, and
-lets it read the diff with `read` and `bash`.
+| Path | What it is |
+|---|---|
+| `.github/workflows/ai-review.yml` | Reusable review workflow called by every repository |
+| `review/prelude.md` | CI-only constraints prepended to the guidelines |
+| `review/verdict.md` | The `REVIEW-VERDICT` protocol appended to the guidelines |
+| `caller/ai-review.yml` | Template for the caller file installed per repository |
+| `templates/` | Pull request and issue templates installed per repository |
+| `scripts/lib.sh` | Shared helpers: ref resolution, pull-request helper |
+| `scripts/install-review.sh` | Writes the caller file into repositories |
+| `scripts/apply-baseline.sh` | Repository settings, CodeQL, templates, ruleset |
+| `scripts/release.sh` | Cuts a release tag |
 
-### Install it
+## How a review runs
+
+1. A pull request opens against the default branch, and the caller workflow
+   starts the reusable workflow at the tag the caller pins.
+2. The job installs [Pi](https://pi.dev) and Node on a fresh `ubuntu-latest`
+   runner, then fetches this repository at `ci-ref` and
+   [pi-agent-config](https://github.com/joaomj/pi-agent-config) at `config-ref`.
+3. It assembles one prompt: a scope header, `review/prelude.md`, the
+   `code-review` guidelines, then `review/verdict.md`.
+4. Pi reviews the checkout with two tools, `read` and `bash`, and writes the
+   report to stdout.
+5. The report is posted as a pull-request review comment by the job's own token.
+6. The final `REVIEW-VERDICT` line decides the job status. A `BLOCK` verdict
+   fails the job; a missing verdict fails it too, because an inconclusive review
+   must not read as approval.
+
+Nothing is hosted. Each review is one job in the repository being reviewed, so
+there is no server, no queue, and no long-lived agent process.
+
+### Inputs
+
+| Input | Default | Meaning |
+|---|---|---|
+| `ci-ref` | required | Tag in this repository supplying the workflow, prelude, and verdict text |
+| `config-ref` | `v0.7.2` | Tag in `pi-agent-config` supplying the guidelines and skills |
+| `guidelines` | `prompts/code-review.md` | Guideline file inside `config-ref` |
+| `model` | `openrouter/openai/gpt-6.1-sol` | Reviewer model |
+| `thinking` | `medium` | Thinking level, clamped to what the model supports |
+
+### Credentials
+
+The job reads exactly one secret, `LLM_API_KEY`, and passes it to Pi with
+`--api-key`. The name is provider-neutral: swap `model` to a different provider
+and the same secret name still works.
+
+The write-scoped `GITHUB_TOKEN` reaches only the step that posts the comment.
+The review step, where the agent runs commands, has no token in its environment.
+
+## Install a review in a repository
 
 ```bash
+# 1. install the caller on a branch and open a pull request
 scripts/install-review.sh --config-ref v0.7.2 joaomj/example-repo
-```
 
-The script writes `.github/workflows/ai-review.yml` on the `ai-review` branch
-and opens a pull request. It pins two commits: the workflow it runs, and the
-guidelines it follows. Pass `--update` to rewrite a branch it already created.
-
-Then add the credential the job needs:
-
-```bash
+# 2. give the job its credential
 gh secret set LLM_API_KEY --repo joaomj/example-repo
+
+# 3. after the caller merges, require the check (see Baseline policy)
 ```
 
-The script never writes secrets. `LLM_API_KEY` is provider-neutral: the model
-input decides which provider is called, and the key reaches Pi through
-`--api-key`. The default reviewer is `openrouter/openai/gpt-6.1-sol` at `medium`
-thinking; pass the `model` and `thinking` inputs to the caller to change it.
+`install-review.sh` validates both tags before touching anything, so a typo
+fails once, not in nine workflows. It never writes repository secrets — that
+stays an explicit step. Re-running it with `--update` rewrites the branch it
+created earlier.
 
-### Make a finding block the merge
+Verify the check name on a real pull request before requiring it: a required
+check that never reports blocks every merge. The context is
+`ai-review / review`, and the first run on any repository confirms it.
+
+## Releases and pinning
+
+Callers pin a release tag, and `uses:` plus `ci-ref` name the same tag. A tag
+never changes once published, because the `release` ruleset on this repository
+blocks tag updates and deletions; only an admin bypass moves one.
+
+Cut a release after changing anything that runs:
 
 ```bash
-gh api --method POST repos/joaomj/example-repo/rulesets --input - <<'JSON'
-{"name":"ai-review","target":"branch","enforcement":"active",
- "conditions":{"ref_name":{"include":["~DEFAULT_BRANCH"]}},
- "rules":[{"type":"required_status_checks","parameters":{"required_status_checks":[{"context":"ai-review / review"}]}}]}
-JSON
+scripts/release.sh v1.1.0
+scripts/install-review.sh --ci-ref v1.1.0 joaomj/<repo>...
 ```
 
-Check the context name on a real pull request before adding the rule: a
-required check that never reports blocks every merge.
-
-### Limits
-
-- Private repositories are skipped: a free plan cannot require a status check
-  there, so a review would report without blocking.
-- Fork pull requests are skipped: they receive no secret.
-- The job fails when it cannot produce a verdict, rather than passing silently.
+A release is the unit of change: until you cut one, no repository moves. To
+upgrade, re-run the installer with the new `--ci-ref`; it rewrites the caller
+and opens a pull request in each repository.
 
 ## Baseline policy
 
@@ -70,6 +109,7 @@ required check that never reports blocks every merge.
 | Required signed commits | ruleset rule |
 | Required pull request, thread resolution | ruleset rule |
 | CodeQL gate at high-risk severity | ruleset rule, added once CodeQL reports |
+| Required AI review | ruleset rule with `--require-review` |
 | Admin escape hatch | ruleset bypass, mode `always` |
 | Secret scanning and push protection | repository settings |
 | Pull requests closed to non-collaborators | repository setting |
@@ -78,18 +118,65 @@ required check that never reports blocks every merge.
 
 ```bash
 scripts/apply-baseline.sh --dry-run joaomj/example-repo
-scripts/apply-baseline.sh joaomj/example-repo
+scripts/apply-baseline.sh --require-review joaomj/example-repo
 ```
 
-The CodeQL rule needs code scanning results, so the first run configures
-scanning and adds the rule only where an analysis already exists. Re-run to add
-it elsewhere.
+Two limits are worth knowing:
+
+- The CodeQL rule needs scan results, so the first run configures scanning and
+  adds the rule only where an analysis exists. Re-run later to add it.
+- Bypass mode `always` means a repository admin skips every rule, including
+  required reviews. On a single-admin account the policy constrains future
+  collaborators, not its owner.
+
+## Operations
+
+| Task | Command |
+|---|---|
+| Change the reviewer model or thinking level | edit `.github/workflows/ai-review.yml`, release, re-pin |
+| Change the review guidelines | edit `prompts/code-review.md` in `pi-agent-config`, release there, re-pin with `--config-ref` |
+| Pause reviews in one repository | `gh workflow disable "AI review" --repo joaomj/<repo>` |
+| Resume reviews | `gh workflow enable "AI review" --repo joaomj/<repo>` |
+| Rotate the key | `gh secret set LLM_API_KEY --repo joaomj/<repo>` |
+| Check a run | `gh run list --repo joaomj/<repo> --workflow "AI review" --limit 5` |
+
+## Troubleshooting
+
+**The check never appears.** The caller must exist on the pull request head or
+the base branch, and the repository must have pull requests enabled. Check
+`gh run list --repo joaomj/<repo> --event pull_request`.
+
+**The job fails with "LLM_API_KEY is empty".** The secret is missing on that
+repository. This failure is deliberate: a review that cannot authenticate must
+not report success.
+
+**The job fails with "Cannot fetch ...".** A pinned tag does not exist. Check
+`git ls-remote https://github.com/joaomj/github-ci refs/tags/<tag>`.
+
+**The job fails with "The review did not end with a REVIEW-VERDICT line".**
+The model omitted the protocol line. Re-run the job; if it repeats, tighten
+`review/verdict.md` rather than letting an inconclusive report pass.
+
+**A merge is blocked with "base branch policy prohibits the merge".** A required
+check is pending or failing. `gh pr checks` shows which. A repository admin can
+merge anyway with `gh pr merge --admin`.
+
+**Fork pull requests never run.** The job skips them: GitHub does not give fork
+pull requests the secret, and running without it would fail the required check
+for an outside contributor.
+
+## Limits
+
+- Private repositories are out of scope: a free plan cannot require a status
+  check there, so a review would report without blocking.
+- Each review costs a model call of unknown size until measured, and consumes
+  Actions minutes on private repositories (public repositories are free).
+- The reviewer sees the diff and the repository at the pull request head, not
+  the runtime behavior of the change.
 
 ## Development
 
-Paths resolve from this directory; the scripts are plain `bash` with `gh` and
-`jq`.
-
 ```bash
-bash -n scripts/lib.sh scripts/install-review.sh scripts/apply-baseline.sh
+bash -n scripts/lib.sh scripts/install-review.sh scripts/apply-baseline.sh scripts/release.sh
+scripts/apply-baseline.sh --dry-run joaomj/<repo>
 ```
