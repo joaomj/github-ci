@@ -12,6 +12,9 @@ resolve_commit() {
   sha=$(git ls-remote "$url" "refs/tags/$ref^{}" | cut -f1)
   [ -n "$sha" ] || sha=$(git ls-remote "$url" "refs/tags/$ref" | cut -f1)
   [ -n "$sha" ] || sha=$(git ls-remote "$url" "refs/heads/$ref" | cut -f1)
+  if [ -z "$sha" ] && printf '%s' "$ref" | grep -Eq '^[0-9a-f]{40}$'; then
+    sha=$ref
+  fi
   [ -n "$sha" ] || die "cannot resolve $ref in $url"
   printf '%s\n' "$sha"
 }
