@@ -235,6 +235,8 @@ for an outside contributor.
   Actions minutes on private repositories (public repositories are free).
 - The reviewer sees the diff and the repository at the pull request head, not
   the runtime behavior of the change.
+- This repository is scanned with CodeQL default setup for the `actions`
+  language. Its own ruleset gains the CodeQL gate once a first analysis exists.
 
 ## Development
 
