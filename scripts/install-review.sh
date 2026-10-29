@@ -74,7 +74,8 @@ for repo in "${repos[@]}"; do
   fi
   caller=$work/caller-${repo##*/}.yml
   sed -e "s|@@BASE_BRANCH@@|$base|g" \
-    -e "s|@@CI_SHA@@|@$ci_sha|g" \
+    -e "s|@@CI_SHA_AT@@|@$ci_sha|g" \
+    -e "s|@@CI_SHA@@|$ci_sha|g" \
     -e "s|@@CONFIG_SHA@@|$config_sha|g" \
     "$here/../caller/ai-review.yml" > "$caller"
   printf '%s\n' "$(open_pr "$repo" ai-review "Add the AI review workflow" "$body" \

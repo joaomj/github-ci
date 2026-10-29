@@ -15,7 +15,7 @@ concurrency:
 
 jobs:
   ai-review:
-    uses: joaomj/github-ci/.github/workflows/ai-review.yml@@CI_SHA@@
+    uses: joaomj/github-ci/.github/workflows/ai-review.yml@@CI_SHA_AT@@
     with:
       ci-ref: "@@CI_SHA@@"
       config-ref: "@@CONFIG_SHA@@"
