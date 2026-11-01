@@ -39,6 +39,10 @@ tag, and every caller can move to it with one command.
    fails the job; a missing verdict fails it too, because an inconclusive review
    must not read as approval.
 
+Each pull request gets one review. Later pushes still run the job, so a
+required check reports, but the job finds the earlier `## AI review` comment
+and ends green without calling the model.
+
 Nothing is hosted. Each review is one job in the repository being reviewed, so
 there is no server, no queue, and no long-lived agent process.
 

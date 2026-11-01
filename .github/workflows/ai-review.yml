@@ -66,23 +66,42 @@ jobs:
       HEAD_REF: ${{ github.event.pull_request.head.ref }}
       HEAD_SHA: ${{ github.event.pull_request.head.sha }}
     steps:
+      # One review per pull request: a later push finds the earlier review and
+      # ends the job green without spending a model call.
+      - name: Check for an earlier review
+        id: prior
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          count=$(gh api --paginate "repos/$GITHUB_REPOSITORY/pulls/$PR_NUMBER/reviews" \
+            --jq '[.[] | select(.user.login == "github-actions[bot]" and (.body | startswith("## AI review")))] | length' \
+            | awk '{ n += $1 } END { print n + 0 }')
+          if [ "$count" -gt 0 ]; then
+            echo "This pull request already has an AI review. Skipping."
+            echo "reviewed=true" >> "$GITHUB_OUTPUT"
+          fi
+
       - name: Check out the pull request
+        if: steps.prior.outputs.reviewed != 'true'
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
           ref: ${{ github.event.pull_request.head.sha }}
           fetch-depth: 0
 
       - name: Install Node.js
+        if: steps.prior.outputs.reviewed != 'true'
         uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
         with:
           node-version: '22'
 
       - name: Install Pi
+        if: steps.prior.outputs.reviewed != 'true'
         run: |
           npm install --prefix "$RUNNER_TEMP/pi" @earendil-works/pi-coding-agent@1.4.0
           printf '%s\n' "$RUNNER_TEMP/pi/node_modules/.bin" >> "$GITHUB_PATH"
 
       - name: Fetch this repository
+        if: steps.prior.outputs.reviewed != 'true'
         env:
           CI_REF: ${{ inputs.ci-ref }}
         run: |
@@ -93,6 +112,7 @@ jobs:
           git -C "$RUNNER_TEMP/ci" checkout --quiet FETCH_HEAD
 
       - name: Fetch the review guidelines
+        if: steps.prior.outputs.reviewed != 'true'
         env:
           CONFIG_REF: ${{ inputs.config-ref }}
         run: |
@@ -103,6 +123,7 @@ jobs:
           git -C "$RUNNER_TEMP/config" checkout --quiet FETCH_HEAD
 
       - name: Assemble the review prompt
+        if: steps.prior.outputs.reviewed != 'true'
         env:
           GUIDELINES: ${{ inputs.guidelines }}
         run: |
@@ -119,6 +140,7 @@ jobs:
           wc -c "$RUNNER_TEMP/prompt.md"
 
       - name: Configure Pi
+        if: steps.prior.outputs.reviewed != 'true'
         run: |
           mkdir -p "$HOME/.pi/agent"
           cat > "$HOME/.pi/agent/settings.json" <<JSON
@@ -130,6 +152,7 @@ jobs:
           JSON
 
       - name: Review the pull request
+        if: steps.prior.outputs.reviewed != 'true'
         env:
           MODEL: ${{ inputs.model }}
           THINKING: ${{ inputs.thinking }}
@@ -139,6 +162,7 @@ jobs:
         run: bash "$RUNNER_TEMP/ci/scripts/review.sh"
 
       - name: Post the review
+        if: steps.prior.outputs.reviewed != 'true'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
@@ -150,6 +174,7 @@ jobs:
           gh pr review "$PR_NUMBER" --repo "$GITHUB_REPOSITORY" --comment --body-file "$RUNNER_TEMP/comment.md"
 
       - name: Enforce the verdict
+        if: steps.prior.outputs.reviewed != 'true'
         run: |
           verdict=$(grep -Eo 'REVIEW-VERDICT: *(BLOCK|PASS)' "$RUNNER_TEMP/review.md" | tail -1 | grep -Eo 'BLOCK|PASS' || true)
           case "$verdict" in
